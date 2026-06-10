@@ -862,14 +862,14 @@ function compressImage(file) {
       const img = new Image();
       img.onerror = reject;
       img.onload = () => {
-        const MAX = 1024;
+        const MAX = 120;  // 縮圖 120px，壓縮後 base64 約 2-5KB，不超出 URL 限制
         let w = img.width, h = img.height;
         if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
         if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.35);
         resolve(dataUrl.split(',')[1]); // base64 only
       };
       img.src = ev.target.result;
@@ -1080,7 +1080,7 @@ async function closeModal() {
       student:   currentStudent,
       date:      today(),
       note:      checkinNote,
-      imageData: imageData || '',  // 壓縮縮圖，Apps Script 存進 Drive
+      imageData: (imageData && imageData.length < 6000) ? imageData : '',  // 超出 6000 字元則略過
       cardId:    drawnCard.id,
       cardName:  drawnCard.name,
       rarity:    drawnCard.rarity
