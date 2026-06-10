@@ -197,6 +197,20 @@ body {
 }
 .note-wrap textarea:focus { border-color: var(--pink); }
 .note-preview { font-size: .78rem; color: var(--text-light); margin-top: 6px; line-height: 1.5; }
+.checkin-uploading {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #EFF6FF; border: 2px solid #93C5FD;
+  border-radius: 50px; padding: 10px 18px;
+  font-size: .9rem; font-weight: 800; color: #1D4ED8;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+.checkin-fail {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #FFF1F1; border: 2px solid #FCA5A5;
+  border-radius: 50px; padding: 10px 18px;
+  font-size: .9rem; font-weight: 800; color: #DC2626;
+}
 
 /* draw */
 .draw-btn {
@@ -677,6 +691,7 @@ let currentStudent  = '';
 let myCards         = new Set();
 let localCheckedIn  = false;
 let checkinNote     = '';
+let driveUrl        = '';   // Google Drive 打卡圖片連結
 let submittedToday  = false;
 let drawnCard       = null;
 let revealed        = false;
@@ -795,7 +810,7 @@ document.getElementById('login-input').addEventListener('keydown', e => {
 // ── 登出 ──
 function doLogout() {
   currentStudent = ''; myCards = new Set();
-  localCheckedIn = false; checkinNote = '';
+  localCheckedIn = false; checkinNote = ''; driveUrl = '';
   submittedToday = false; drawnCard = null;
   isDemoMode = false;
   document.getElementById('demoBadge').style.display = 'none';
@@ -838,12 +853,115 @@ function renderCheckin() {
   }
 }
 
-function onFileUpload(e) {
+// ── 圖片壓縮（縮到 1024px 以內，JPEG 0.75，大幅減少 base64 體積）──
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = ev => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const MAX = 1024;
+        let w = img.width, h = img.height;
+        if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+        if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+        resolve(dataUrl.split(',')[1]); // base64 only
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── 非圖片檔案轉 base64 ──────────────────────────────────────
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = ev => resolve(ev.target.result.split(',')[1]);
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── 上傳檔案到 Google Drive（透過 Apps Script doPost）─────────
+async function uploadFileToDrive(file) {
+  // 示範模式：假裝上傳成功
+  if (isDemoMode) {
+    await new Promise(r => setTimeout(r, 700));
+    return 'https://drive.google.com/file/d/demo/view';
+  }
+
+  let base64, mimeType, fileName;
+  const date = today();
+  const ext  = file.name.split('.').pop() || 'bin';
+
+  if (file.type.startsWith('image/')) {
+    base64   = await compressImage(file);
+    mimeType = 'image/jpeg';
+    fileName = `${currentStudent}_${date}.jpg`;
+  } else {
+    base64   = await fileToBase64(file);
+    mimeType = file.type || 'application/octet-stream';
+    fileName = `${currentStudent}_${date}.${ext}`;
+  }
+
+  // 超過 10MB base64 就跳過（避免 timeout）
+  if (base64.length > 13 * 1024 * 1024) {
+    console.warn('檔案過大，略過 Drive 上傳');
+    return null;
+  }
+
+  const res = await fetch(SCRIPT_URL, {
+    method:  'POST',
+    headers: { 'Content-Type': 'text/plain' }, // 避免 CORS preflight
+    body: JSON.stringify({
+      action:   'upload',
+      student:  currentStudent,
+      date:     date,
+      fileName: fileName,
+      mimeType: mimeType,
+      fileData: base64
+    })
+  });
+
+  const data = await res.json();
+  if (data.success) return data.url;
+  throw new Error(data.error || '上傳失敗');
+}
+
+// ── 學生選擇檔案後觸發 ────────────────────────────────────────
+async function onFileUpload(e) {
   if (!e.target.files[0]) return;
+  const file = e.target.files[0];
   checkinNote = document.getElementById('noteInput')?.value || '';
+
+  const sec = document.getElementById('checkinSection');
+  sec.innerHTML = '<div class="checkin-uploading">⏳ 上傳到雲端中，請稍候...</div>';
+
+  try {
+    driveUrl = await uploadFileToDrive(file) || '';
+  } catch (err) {
+    console.error('Drive 上傳失敗：', err);
+    driveUrl = '';
+    // 上傳失敗仍可繼續抽獎，不卡住學生
+    sec.innerHTML = `<div class="checkin-fail">⚠️ 圖片上傳失敗，仍可繼續抽獎</div>`;
+    localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
+    localCheckedIn = true;
+    renderDrawBtn();
+    return;
+  }
+
   localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
   localCheckedIn = true;
-  renderCheckin();
+  sec.innerHTML = `
+    <div class="checkin-done">✅ 已上傳到雲端！</div>
+    ${checkinNote ? `<div class="note-preview">📝 ${escHtml(checkinNote)}</div>` : ''}
+  `;
   renderDrawBtn();
   spawnParticles(['📸','✅','🌟'], 10);
 }
@@ -1021,6 +1139,7 @@ async function closeModal() {
       student:  currentStudent,
       date:     today(),
       note:     checkinNote,
+      driveUrl: driveUrl || '',
       cardId:   drawnCard.id,
       cardName: drawnCard.name,
       rarity:   drawnCard.rarity
