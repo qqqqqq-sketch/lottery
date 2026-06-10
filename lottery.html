@@ -970,7 +970,10 @@ function openDraw() {
   document.getElementById('submitStatus').textContent = '';
 
   document.getElementById('drawModal').classList.add('show');
-  setTimeout(() => card3d.classList.add('shaking'), 200);
+  setTimeout(() => {
+    card3d.classList.add('shaking');
+    setTimeout(() => card3d.classList.remove('shaking'), 520);
+  }, 200);
 }
 
 function onCardClick() {
