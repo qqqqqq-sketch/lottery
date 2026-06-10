@@ -691,7 +691,7 @@ let currentStudent  = '';
 let myCards         = new Set();
 let localCheckedIn  = false;
 let checkinNote     = '';
-let driveUrl        = '';   // Google Drive 打卡圖片連結
+let imageData       = '';   // 壓縮後的打卡縮圖 base64（送出時一起上傳）
 let submittedToday  = false;
 let drawnCard       = null;
 let revealed        = false;
@@ -810,7 +810,7 @@ document.getElementById('login-input').addEventListener('keydown', e => {
 // ── 登出 ──
 function doLogout() {
   currentStudent = ''; myCards = new Set();
-  localCheckedIn = false; checkinNote = ''; driveUrl = '';
+  localCheckedIn = false; checkinNote = ''; imageData = '';
   submittedToday = false; drawnCard = null;
   isDemoMode = false;
   document.getElementById('demoBadge').style.display = 'none';
@@ -878,88 +878,29 @@ function compressImage(file) {
   });
 }
 
-// ── 非圖片檔案轉 base64 ──────────────────────────────────────
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = reject;
-    reader.onload = ev => resolve(ev.target.result.split(',')[1]);
-    reader.readAsDataURL(file);
-  });
-}
-
-// ── 上傳檔案到 Google Drive（透過 Apps Script doPost）─────────
-async function uploadFileToDrive(file) {
-  // 示範模式：假裝上傳成功
-  if (isDemoMode) {
-    await new Promise(r => setTimeout(r, 700));
-    return 'https://drive.google.com/file/d/demo/view';
-  }
-
-  let base64, mimeType, fileName;
-  const date = today();
-  const ext  = file.name.split('.').pop() || 'bin';
-
-  if (file.type.startsWith('image/')) {
-    base64   = await compressImage(file);
-    mimeType = 'image/jpeg';
-    fileName = `${currentStudent}_${date}.jpg`;
-  } else {
-    base64   = await fileToBase64(file);
-    mimeType = file.type || 'application/octet-stream';
-    fileName = `${currentStudent}_${date}.${ext}`;
-  }
-
-  // 超過 10MB base64 就跳過（避免 timeout）
-  if (base64.length > 13 * 1024 * 1024) {
-    console.warn('檔案過大，略過 Drive 上傳');
-    return null;
-  }
-
-  const res = await fetch(SCRIPT_URL, {
-    method:  'POST',
-    headers: { 'Content-Type': 'text/plain' }, // 避免 CORS preflight
-    body: JSON.stringify({
-      action:   'upload',
-      student:  currentStudent,
-      date:     date,
-      fileName: fileName,
-      mimeType: mimeType,
-      fileData: base64
-    })
-  });
-
-  const data = await res.json();
-  if (data.success) return data.url;
-  throw new Error(data.error || '上傳失敗');
-}
-
-// ── 學生選擇檔案後觸發 ────────────────────────────────────────
+// ── 學生選擇檔案後觸發：壓縮成縮圖，送出時一起上傳 ──────────
 async function onFileUpload(e) {
-  if (!e.target.files[0]) return;
   const file = e.target.files[0];
+  if (!file) return;
   checkinNote = document.getElementById('noteInput')?.value || '';
 
   const sec = document.getElementById('checkinSection');
-  sec.innerHTML = '<div class="checkin-uploading">⏳ 上傳到雲端中，請稍候...</div>';
+  sec.innerHTML = '<div class="checkin-uploading">⏳ 處理中...</div>';
 
   try {
-    driveUrl = await uploadFileToDrive(file) || '';
-  } catch (err) {
-    console.error('Drive 上傳失敗：', err);
-    driveUrl = '';
-    // 上傳失敗仍可繼續抽獎，不卡住學生
-    sec.innerHTML = `<div class="checkin-fail">⚠️ 圖片上傳失敗，仍可繼續抽獎</div>`;
-    localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
-    localCheckedIn = true;
-    renderDrawBtn();
-    return;
+    if (file.type.startsWith('image/')) {
+      imageData = await compressImage(file); // 壓縮成縮圖
+    } else {
+      imageData = ''; // 非圖片不包含縮圖
+    }
+  } catch(err) {
+    imageData = '';
   }
 
   localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
   localCheckedIn = true;
   sec.innerHTML = `
-    <div class="checkin-done">✅ 已上傳到雲端！</div>
+    <div class="checkin-done">✅ 打卡完成！送出後圖片自動存入雲端</div>
     ${checkinNote ? `<div class="note-preview">📝 ${escHtml(checkinNote)}</div>` : ''}
   `;
   renderDrawBtn();
@@ -1135,14 +1076,14 @@ async function closeModal() {
 
   try {
     const res = await api({
-      action:   'submit',
-      student:  currentStudent,
-      date:     today(),
-      note:     checkinNote,
-      driveUrl: driveUrl || '',
-      cardId:   drawnCard.id,
-      cardName: drawnCard.name,
-      rarity:   drawnCard.rarity
+      action:    'submit',
+      student:   currentStudent,
+      date:      today(),
+      note:      checkinNote,
+      imageData: imageData || '',  // 壓縮縮圖，Apps Script 存進 Drive
+      cardId:    drawnCard.id,
+      cardName:  drawnCard.name,
+      rarity:    drawnCard.rarity
     });
 
     // 成功（若伺服器說重複也當成功，避免學生重複卡住）
