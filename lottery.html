@@ -641,6 +641,7 @@ body {
 //  ★ 設定區 — 部署 Apps Script 後，把網址貼在下方引號內
 // ═══════════════════════════════════════════════════════
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx3TuO9sG-OrNhODWzH26Nkw9nUJf_hPjsNW92hh-wsR3zzbubA_30Vat_frrQIJhkZ/exec';
+const IMGBB_KEY  = '3c763af9a043268aa31373b39aa63f43'; // ← 把這裡換成你的 imgBB API Key
 
 // ═══════════════════════════════════════════════════════
 //  卡片資料（新增卡片：在此陣列最後加入新物件即可）
@@ -793,6 +794,7 @@ async function doLogin() {
     myCards = new Set((colRes.cards || []).map(Number));
     // 本地打卡狀態（同裝置當天的上傳記錄）
     localCheckedIn = localStorage.getItem(`ci_${val}_${today()}`) === '1';
+    imageData      = localStorage.getItem(`img_${val}_${today()}`) || ''; // 恢復 imgBB 連結
     hideLoading();
     showMain();
     renderMain();
@@ -862,14 +864,14 @@ function compressImage(file) {
       const img = new Image();
       img.onerror = reject;
       img.onload = () => {
-        const MAX = 120;  // 縮圖 120px，壓縮後 base64 約 2-5KB，不超出 URL 限制
+        const MAX = 1200; // 最大 1200px，imgBB 支援高畫質
         let w = img.width, h = img.height;
         if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
         if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.35);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
         resolve(dataUrl.split(',')[1]); // base64 only
       };
       img.src = ev.target.result;
@@ -878,29 +880,59 @@ function compressImage(file) {
   });
 }
 
-// ── 學生選擇檔案後觸發：壓縮成縮圖，送出時一起上傳 ──────────
+// ── 上傳圖片到 imgBB，回傳可查看的 URL ───────────────────────
+async function uploadToImgBB(file) {
+  if (isDemoMode) {
+    await new Promise(r => setTimeout(r, 700));
+    return 'https://i.ibb.co/demo/photo.jpg';
+  }
+  const base64 = await compressImage(file);
+  const form = new FormData();
+  form.append('key', IMGBB_KEY);
+  form.append('image', base64);
+  form.append('name', `${currentStudent}_${today()}`);
+  const res = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: form });
+  const data = await res.json();
+  if (data.success) return data.data.url;
+  throw new Error(data.error?.message || '上傳失敗');
+}
+
+// ── 學生選擇檔案後觸發 ────────────────────────────────────────
 async function onFileUpload(e) {
   const file = e.target.files[0];
   if (!file) return;
   checkinNote = document.getElementById('noteInput')?.value || '';
-
   const sec = document.getElementById('checkinSection');
-  sec.innerHTML = '<div class="checkin-uploading">⏳ 處理中...</div>';
+
+  if (!file.type.startsWith('image/')) {
+    // 非圖片：只記文字打卡
+    imageData = '';
+    localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
+    localCheckedIn = true;
+    sec.innerHTML = `<div class="checkin-done">✅ 打卡完成！</div>${checkinNote ? `<div class="note-preview">📝 ${escHtml(checkinNote)}</div>` : ''}`;
+    renderDrawBtn();
+    return;
+  }
+
+  sec.innerHTML = '<div class="checkin-uploading">⏳ 上傳圖片中，請稍候...</div>';
 
   try {
-    if (file.type.startsWith('image/')) {
-      imageData = await compressImage(file); // 壓縮成縮圖
-    } else {
-      imageData = ''; // 非圖片不包含縮圖
-    }
+    imageData = await uploadToImgBB(file); // 拿到 imgBB 圖片 URL
+    localStorage.setItem(`img_${currentStudent}_${today()}`, imageData); // 存起來防刷新遺失
   } catch(err) {
+    console.error('imgBB 上傳失敗:', err);
     imageData = '';
+    sec.innerHTML = `<div class="checkin-fail">⚠️ 圖片上傳失敗，仍可繼續抽獎</div>`;
+    localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
+    localCheckedIn = true;
+    renderDrawBtn();
+    return;
   }
 
   localStorage.setItem(`ci_${currentStudent}_${today()}`, '1');
   localCheckedIn = true;
   sec.innerHTML = `
-    <div class="checkin-done">✅ 打卡完成！送出後圖片自動存入雲端</div>
+    <div class="checkin-done">✅ 圖片已上傳！</div>
     ${checkinNote ? `<div class="note-preview">📝 ${escHtml(checkinNote)}</div>` : ''}
   `;
   renderDrawBtn();
@@ -1072,7 +1104,7 @@ async function closeModal() {
   const btn    = document.getElementById('modalCloseBtn');
   const status = document.getElementById('submitStatus');
   btn.disabled    = true;
-  status.textContent = '送出中... ⏳';
+  status.textContent = imageData ? '送出中（含圖片）⏳' : '送出中（無圖片）⏳';
 
   try {
     const res = await api({
@@ -1080,7 +1112,7 @@ async function closeModal() {
       student:   currentStudent,
       date:      today(),
       note:      checkinNote,
-      imageData: (imageData && imageData.length < 6000) ? imageData : '',  // 超出 6000 字元則略過
+      checkinImgUrl: imageData || '',  // imgBB 圖片連結
       cardId:    drawnCard.id,
       cardName:  drawnCard.name,
       rarity:    drawnCard.rarity
@@ -1089,7 +1121,7 @@ async function closeModal() {
     // 成功（若伺服器說重複也當成功，避免學生重複卡住）
     myCards.add(drawnCard.id);
     submittedToday = true;
-
+    alert(imageData ? '【診斷】有圖片連結：\n' + imageData.substring(0,60) : '【診斷】imageData 是空的！'); // 診斷用，確認後會刪除
     document.getElementById('drawModal').classList.remove('show');
     btn.disabled = false;
     const justDrawn = drawnCard;
